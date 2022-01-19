@@ -1,4 +1,5 @@
 import bluetooth
+import buttons
 import display
 import json
 import library
@@ -268,21 +269,8 @@ class RootMenu(Menu):
 
     def onPress(self, btn):
         if btn == _C.U or btn == _C.D:
-            rewind = False
-            if btn == _C.U and self.ui.shouldBePlaying:
-                media = self.ui.ensureMedia()
-                rewind = media and media.get_duration() * self.ui.player.get_position() > 5000
-            if rewind:
-                self.ui.player.set_position(0)
-                self.paint()
-            else:
-                oldIndex = self.ui.playlist.index
-                newIndex = oldIndex + (-1 if btn == _C.U else 1)
-                if newIndex < 0: newIndex = self.ui.playlist.count() - 1
-                elif newIndex >= self.ui.playlist.count(): newIndex = 0
-                if self.ui.selectSong(newIndex) != oldIndex:
-                    if self.ui.player.is_playing(): self.ui.playCurrent()
-                    self.paint()
+            if btn == _C.U: self.ui.previousTrack()
+            elif btn == _C.D: self.ui.nextTrack(canRewind=True)
         elif btn == _C.L or btn == _C.R:
             if self.ui.player.is_playing():
                 media = self.ui.player.get_media()
@@ -350,9 +338,10 @@ class MainMenu(ListMenu):
         d = {}
         if not self.ui.playlist.isempty(): d['Playlist'] = None
         d['Library'] = None
-        d['Bluetooth'] = None
+        d['Bluetooth' + (' (off)' if self.ui.isWifiEnabled else '')] = None
         d['Shuffle: ' + ('yes' if self.ui.shuffle else 'no')] = None
         d['Repeat: ' + ('yes' if self.ui.repeat else 'no')] = None
+        d['Wifi: ' + ('on' if self.ui.isWifiEnabled else 'off')] = None
         d['Exit'] = None
         return d
 
@@ -372,6 +361,9 @@ class MainMenu(ListMenu):
         elif key.startswith('Repeat'):
             self.ui.repeat = not self.ui.repeat
             self.ui.saveSettings()
+            self.refreshList(False)
+        elif key.startswith('Wifi'):
+            self.ui.enableWifi(not self.ui.isWifiEnabled)
             self.refreshList(False)
 
 class LibraryMenu(ListMenu):
@@ -486,7 +478,7 @@ class UI:
         self.repeat = True
         self.shuffle = True
         self.events = queue.Queue()
-        self.display = display.Display(lambda btn: self.press(btn))
+        self.display = display.Display(lambda btn: self.events.put(btn))
         self.display.power(True)
         self.smallFont = self.display.font.font_variant(size=16)
         self.bigFont = self.display.font.font_variant(size=30)
@@ -495,9 +487,11 @@ class UI:
         self.library = library.Library('/home/pi/music')
         self.scanner = bluetooth.Scanner(onAdded=lambda s,d: self.btEvent(d, 'A'),
             onChanged=lambda s,d: self.btEvent(d, 'C'), onRemoved=lambda s,d: self.btEvent(d, 'R'))
+        self.buttons = buttons.ButtonScanner(lambda btn: self.events.put(btn))
 
     def btEvent(self, dev, op): self.menu().onBtEvent(dev, op)
     def cleanup(self):
+        self.buttons.stop()
         self.scanner.stop()
         self.display.cleanup()
 
@@ -509,7 +503,6 @@ class UI:
         sys.exit(0)
 
     def menu(self): return self.stack[-1]
-    def press(self, btn): self.events.put(btn)
 
     def push(self, menu):
         self.menu().leave()
@@ -593,6 +586,9 @@ class UI:
         if clear: self.playlist.clear()
         self.playSong(self.addSongs(songs, moveTo=True, trimNumbers=trimNumbers), toggle)
 
+    def previousTrack(self): return self._prevNextTrack(buttons.KEY_PREVIOUS)
+    def nextTrack(self, canRewind=False): return self._prevNextTrack(buttons.KEY_NEXT, canRewind)
+
     def selectSong(self, song):
         index = self.playlist.index
         if self.playlist.select(song) and self.playlist.index != index: self.saveSettings()
@@ -610,6 +606,12 @@ class UI:
         if not self.player.is_playing(): self._play()
         else: self._pause()
 
+    def enableWifi(self, on):
+        p = subprocess.run(['/usr/bin/sudo', '/usr/local/bin/' + ('revive' if on else 'kill') + '-wifi'])
+        if p.returncode == 0:
+            self.isWifiEnabled = on
+            subprocess.run(['/usr/sbin/rfkill', 'block' if on else 'unblock', 'bluetooth'])
+
     def run(self):
         def sigint(sig, frame): self.exit()
         def sigalarm(sig, frame):
@@ -621,6 +623,7 @@ class UI:
         self.library.scan()
         self.playlist = library.Playlist('/home/pi/music/playlist', self.library)
         self.player = vlc.MediaPlayer()
+        self.buttons.start()
 
         try:
             with open('/home/pi/.player') as f:
@@ -632,6 +635,7 @@ class UI:
         except: pass
 
         self.shouldBePlaying = False
+        self.isWifiEnabled = self._checkWifiEnabled()
         self.stack.pop().leave()
         self.stack.append(RootMenu())
         self.menu().init(self)
@@ -639,7 +643,8 @@ class UI:
         while True: # TODO: now that we have a queue, collapse painting together, etc
             e = self.events.get()
             if e == 0: self.tick()
-            else: self.menu().onPress(e)
+            elif e <= 40: self.menu().onPress(e)
+            else: self._mediaButton(e)
 
     def saveSettings(self):
         settings = {'repeat':self.repeat, 'shuffle':self.shuffle}
@@ -649,12 +654,48 @@ class UI:
 
     def tick(self): self.menu().tick()
 
-    def _play(self):
-        self.player.play()
-        self.shouldBePlaying = True
+    def _checkWifiEnabled(self):
+        p = subprocess.run(['/usr/sbin/rfkill', '--json'], capture_output=True)
+        if p.returncode == 0:
+            o = json.loads(p.stdout)
+            for r in o.get('', []):
+                if r['type'] == 'wlan': return r['soft'] == 'unblocked' and r['hard'] == 'unblocked'
+        return False
+
+    def _mediaButton(self, btn):
+        if btn == buttons.KEY_PREVIOUS or btn == buttons.KEY_NEXT: self._prevNextTrack(btn, True)
+        elif btn == buttons.KEY_PAUSE or btn == buttons.KEY_PLAYPAUSE: # some devices send PAUSE when they mean PLAYPAUSE...
+            if self.player.is_playing(): self._pause()
+            else: self.playCurrent()
+        elif btn == buttons.KEY_PLAY: self.playCurrent()
+        elif btn == buttons.KEY_STOP: self._stop()
 
     def _pause(self):
         self.player.pause()
         self.shouldBePlaying = False
+
+    def _play(self):
+        self.player.play()
+        self.shouldBePlaying = True
+
+    def _prevNextTrack(self, btn, canRewind=False):
+        changed = False
+        rewind = False
+        if canRewind and btn == buttons.KEY_PREVIOUS and self.shouldBePlaying:
+            media = self.ensureMedia()
+            rewind = media and media.get_duration() * self.player.get_position() > 5000
+        if rewind:
+            self.player.set_position(0)
+            changed = True
+        else:
+            oldIndex = self.playlist.index
+            newIndex = oldIndex + (-1 if btn == buttons.KEY_PREVIOUS else 1)
+            if newIndex < 0: newIndex = self.playlist.count() - 1
+            elif newIndex >= self.playlist.count(): newIndex = 0
+            if self.selectSong(newIndex) != oldIndex:
+                if self.player.is_playing(): self.playCurrent()
+                changed = True
+
+        if changed and type(self.menu()) == RootMenu: self.menu().paint()
 
 UI().run()
