@@ -164,7 +164,7 @@ class ListMenu(Menu):
             buckets = {}
             if self.collapse == 'substr':
                 letters = '0123456789abcdefghijklmnopqrstuvwxyz'
-                if depth: letters = ' ' + letters
+                if depth: letters = " '" + letters
                 for c in letters:
                     sub = prevBucket + c if prevBucket else c
                     rgx = re.compile(r'\b' + sub, re.I) # pure substring search is a bit weird so use the starts of words
@@ -186,11 +186,15 @@ class ListMenu(Menu):
             if self.collapse == 'substr':
                 dedup = {}
                 for bucket, L in buckets.items():
-                    if len(L) > 2:
+                    if len(L) > 2 and count > threshold:
                         key = '...' + bucket.upper() + '...'
                         self.keys.append(key)
                         self.items[key] = ListMenu._collapsed(L, bucket)
-                        for k in L: dedup[k] = None
+                        count += 1
+                        for k in L:
+                            if k not in dedup:
+                                dedup[k] = None
+                                count -= 1
                     else:
                         for k in L:
                             if k not in dedup:
