@@ -21,6 +21,7 @@ _Unselected = _C.Gray
 _numRe = re.compile('^[0-9]+ - ')
 
 class Menu:
+    def __init__(self): self.headerSize = 0
     def deinit(self): self.leave()
     def init(self, ui):
         self.ui = ui
@@ -32,13 +33,15 @@ class Menu:
     def onPress(self, btn): pass
     def paint(self):
         self.ui.clear()
+        self.paintCore()
         self.d.flip()
+    def paintCore(self): pass
     def tick(self): pass
 
     def center(self, item, color, font=None, y=None):
         if type(item) == str: item = self.measure(item, font)
-        if y is None: y = (self.d.height - item[0]) // 2
-        startY = y
+        if y is None: y = (self.d.height - self.headerSize - item[0]) // 2 + self.headerSize
+        startY = max(self.headerSize, y)
         for line, w, h in item[1]:
             self.d.text((self.d.width-w) // 2, y, line, color, font)
             y += h
@@ -71,9 +74,7 @@ class Menu:
         return (h,lines)
 
 class LoadingMenu(Menu):
-    def paint(self):
-        self.d.center('Loading...', _C.White)
-        self.d.flip()
+    def paintCore(self): self.d.center('Loading...', _C.White)
 
 class ListMenu(Menu):
     class _collapsed:
@@ -82,6 +83,7 @@ class ListMenu(Menu):
             self.group = group
 
     def __init__(self):
+        super().__init__()
         self.collapse = False
         self.sort = True
         self.keepIndex = False
@@ -122,8 +124,7 @@ class ListMenu(Menu):
 
     def onSelected(self, key, value, btn): pass
 
-    def paint(self):
-        self.ui.clear()
+    def paintCore(self):
         if len(self.keys):
             Spacing = 4
             (y,h) = self.center(self.keys[self.index], _Selected)
@@ -139,7 +140,6 @@ class ListMenu(Menu):
                 h = self.center(self.keys[i], _Unselected, self.ui.smallFont, y)[1]
                 y += h + Spacing
                 i += 1
-        self.d.flip()
 
     def refreshList(self, repaint=True):
         oldKey = None
@@ -278,8 +278,8 @@ class RootMenu(Menu):
 
     def onPress(self, btn):
         if btn == _C.U or btn == _C.D:
-            if btn == _C.U: self.ui.previousTrack()
-            elif btn == _C.D: self.ui.nextTrack(canRewind=True)
+            if btn == _C.U: self.ui.previousTrack(canRewind=True)
+            elif btn == _C.D: self.ui.nextTrack()
         elif btn == _C.L or btn == _C.R:
             if self.ui.player.is_playing():
                 media = self.ui.player.get_media()
@@ -294,8 +294,7 @@ class RootMenu(Menu):
             else: self.ui.playSong(current, toggle=True)
         elif btn == _C.B: self.ui.push(MainMenu())
 
-    def paint(self):
-        self.ui.clear()
+    def paintCore(self):
         song = self.ui.playlist.getCurrent()
         if not song:
             self.d.center('Empty playlist', _C.White)
@@ -322,7 +321,6 @@ class RootMenu(Menu):
                 if pos > 0: self.d.rect(0, y - 1, int(self.d.width*frac), self.d.height - (y-1), (32, 48, 128))
                 self.d.text(1, y, timeStr(pos), _C.White)
                 self.d.text(self.d.width-w-1, y, remStr, _C.White)
-        self.d.flip()
 
     def tick(self):
         if not self.ui.pendingPlay:
@@ -383,8 +381,7 @@ class SystemMenu(Menu):
         super().__init__()
         self.ticks = 0
 
-    def paint(self):
-        self.d.clear()
+    def paintCore(self):
         load = subprocess.run(['/usr/bin/uptime'], capture_output=True)
         load = re.search('load average:\s*([0-9]+(?:\.[0-9]*)?)', load.stdout.decode('utf-8'))
         mem = subprocess.run(['/usr/bin/free', '-wk'], capture_output=True)
@@ -395,7 +392,6 @@ class SystemMenu(Menu):
         load = self.measure('CPU load: ' + load.group(1))
         self.center(load, _C.White, y=y-load[0]-4)
         self.center('Temp: ' + str(int((temp*9//5+32500)//1000)) + ' F (' + str(int(temp+500)//1000) + ' C)', _C.White, y=y+h+4)
-        self.d.flip()
 
     def onPress(self, btn):
         if btn == _C.B: self.ui.pop()
@@ -403,16 +399,6 @@ class SystemMenu(Menu):
     def tick(self):
         self.ticks += 1
         if self.ticks % 5 == 0: self.paint() # repaint every 5 seconds
-
-class LibraryMenu(ListMenu):
-    def getItems(self):
-        all = []
-        for group in self.ui.library.groups.values(): all.extend(group.songs)
-        d = dict(self.ui.library.groups)
-        d[' All '] = library.Group('All', all) # HACK: spaces make it sort at the top...
-        return d
-
-    def onSelected(self, key, value, btn): self.ui.push(GroupMenu(value.songs))
 
 class MusicMenu(ListMenu):
     def __init__(self, songs, playlist=False, trimNumbers=False):
@@ -423,7 +409,32 @@ class MusicMenu(ListMenu):
         self.trimNumbers = trimNumbers
 
     def onSelected(self, key, value, btn):
-        if btn == _C.A: self.ui.push(PlayMenu(value, self.playlist, self.trimNumbers))
+        if btn == _C.A:
+            if type(value) == library.Group: value = value.songs
+            if type(value) == library.Song or len(value) == 1:
+                song = value if type(value) == library.Song else value[0]
+                h1 = song.artist
+                h2 = song.title
+            else:
+                h1 = str(len(value)) + ' song' + ('s' if len(value) > 1 else '')
+                h2 = key
+            self.ui.push(PlayMenu(value, h1, h2, self.playlist, trimNumbers=self.trimNumbers))
+
+class LibraryMenu(MusicMenu):
+    def __init__(self):
+        super().__init__(None)
+        self.sort = False
+
+    def getItems(self):
+        all = []
+        for group in self.ui.library.groups.values(): all.extend(group.songs)
+        d = {'All': library.Group('All', all)}
+        for g in sorted(self.ui.library.groups.values(), key=lambda g: g.name): d[g.name] = g
+        return d
+
+    def onSelected(self, key, value, btn):
+        if btn == _C.A: super().onSelected(key, value, btn)
+        else: self.ui.push(GroupMenu(value.songs))
 
 class ArtistMenu(MusicMenu):
     def getItems(self):
@@ -448,8 +459,8 @@ class FolderMenu(MusicMenu):
             L.append(s)
         return d
 
-    def onSelected(self, artist, songs, btn):
-        if btn == _C.A: super().onSelected(artist, songs, btn)
+    def onSelected(self, folder, songs, btn):
+        if btn == _C.A: super().onSelected(folder, songs, btn)
         else: self.ui.push(SongMenu(songs, self.playlist))
 
 class GroupMenu(MusicMenu):
@@ -458,7 +469,13 @@ class GroupMenu(MusicMenu):
         self.sort = False
 
     def getItems(self):
-        d = {'All (Titles)':None, 'Artists':None, 'Find':None, 'Folders':None}
+        d = {}
+        if self.playlist:
+            d['Show'] = None
+            d['Titles'] = None
+        else:
+            d['All (Titles)'] = None
+        for k in ('Artists','Find','Folders'): d[k] = None
         if self.playlist: d['Clear'] = None
         return d
 
@@ -469,16 +486,37 @@ class GroupMenu(MusicMenu):
         elif key == 'Clear':
             self.ui.clearSongs()
             self.ui.pop()
-        elif btn == _C.A and not self.playlist: super().onSelected(key, self.songs, btn)
+        elif key == 'Show':
+            menu = SongMenu(self.songs, playlist=self.playlist)
+            menu.sort = menu.collapse = False
+            menu.keepIndex = True
+            menu.index = self.ui.playlist.index
+            self.ui.push(menu)
+        elif btn == _C.A and not self.playlist: super().onSelected(None, self.songs, btn)
         else: self.ui.push(SongMenu(self.songs, playlist=self.playlist, trimNumbers=True))
 
 class PlayMenu(ListMenu):
-    def __init__(self, songs, playlist=False, trimNumbers=False):
+    def __init__(self, songs, h1=None, h2=None, playlist=False, trimNumbers=False):
         super().__init__()
         self.sort = False
         self.songs = songs
         self.playlist = playlist
         self.trimNumbers = trimNumbers
+        self.h1 = h1
+        self.h2 = h2
+
+    def enter(self, firstTime):
+        if firstTime:
+            if self.h1:
+                self.h1Dims = self.d.textsize(self.h1)
+                self.headerSize = self.h1Dims[1] + 1
+                if self.h2: self.headerSize += 2
+            if self.h2:
+                self.h2 = self.measure(self.h2, self.ui.bigFont)
+                if len(self.h2[1]) > 3: # only show the first three lines of the header to leave space for the menu
+                    self.h2 = (self.h2[1][0][2] + self.h2[1][1][2] + self.h2[1][2][2], self.h2[1][0:3])
+                self.headerSize += self.h2[0]
+        super().enter(firstTime)
 
     def getItems(self):
         return {'Enqueue and Play':None, 'Enqueue':None, 'Play':None} if not self.playlist else {'Play':None, 'Dequeue':None}
@@ -495,6 +533,14 @@ class PlayMenu(ListMenu):
         else:
             self.ui.playSongs(self.songs, clear=(key=='Play' and not self.playlist), trimNumbers=self.trimNumbers)
             self.ui.popAll()
+
+    def paintCore(self):
+        y = 1
+        if self.h1:
+            self.d.text(max(0, (self.d.width-self.h1Dims[0]) // 2), 1, self.h1, _C.Gray)
+            y += self.h1Dims[1] + 2
+        if self.h2: self.center(self.h2, _C.White, self.ui.bigFont, y)
+        super().paintCore()
 
 class SongMenu(MusicMenu):
     def getItems(self):
@@ -624,8 +670,8 @@ class UI:
         if clear: self.playlist.clear()
         self.playSong(self.addSongs(songs, moveTo=True, trimNumbers=trimNumbers), toggle)
 
-    def previousTrack(self): return self._prevNextTrack(buttons.KEY_PREVIOUS)
-    def nextTrack(self, canRewind=False): return self._prevNextTrack(buttons.KEY_NEXT, canRewind)
+    def previousTrack(self, canRewind=False): return self._prevNextTrack(buttons.KEY_PREVIOUS, canRewind)
+    def nextTrack(self): return self._prevNextTrack(buttons.KEY_NEXT)
 
     def selectSong(self, song):
         index = self.playlist.index

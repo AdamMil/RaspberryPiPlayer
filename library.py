@@ -37,10 +37,10 @@ class Library:
                 self.groups[name] = self._scanGroup(name)
 
     def _scanGroup(self, name):
-        return Group(name, Library._scanSongs(self.root, name))
+        return Group(name, Library._scanSongs(self.root, name, []))
 
     @staticmethod
-    def _scanSongs(root, rel, songs=[]):
+    def _scanSongs(root, rel, songs):
         dir = os.path.join(root, rel)
         for name in os.listdir(dir):
             s = os.stat(os.path.join(dir, name))
@@ -120,8 +120,10 @@ class Playlist:
                 if index >= 0:
                     self.paths.pop(song.path)
                     if index > self.index or index == len(self.songs): self.index -= 1
-            self.songs = [self.songs[i] for i in self.paths.values()]
-            self.paths = {self.songs[i].path:i for i in range(len(self.songs))}
+            L = [self.songs[i] for i in self.paths.values()]
+            self.paths = {L[i].path:i for i in range(len(L))}
+            self.songs.clear() # avoid changing the self.songs reference, since others may have a reference to it
+            self.songs.extend(L)
         if not self._validIndex(): self.index = 0
 
     def contains(self, song): return song.path in self.paths
