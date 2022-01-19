@@ -38,12 +38,14 @@ class Menu:
         if type(item) == str: item = self.measure(item, font)
         if y is None: y = (self.d.height - item[0]) // 2
         startY = y
-        for line in item[1]: y += self.d.center(line, color, y, font)[1]
+        for line, w, h in item[1]:
+            self.d.text((self.d.width-w) // 2, y, line, color, font)
+            y += h
         return (startY, item[0])
 
     def measure(self, s, font=None):
         (w,h) = self.d.textsize(s, font)
-        if w <= self.d.width: return (h,(s,))
+        if w <= self.d.width: return (h,((s,w,h),))
         words = s.split()
         (i, x, h, lh, line, lines) = (0, 0, 0, 0, '', [])
         while i < len(words):
@@ -51,17 +53,19 @@ class Menu:
             (w,bh) = self.d.textsize(bit, font)
             x += w
             lh = max(lh, bh)
+            wrap = x > self.d.width
             if not line: line = bit
-            elif x <= self.d.width: line += bit
-            if x > self.d.width:
-                lines.append(line)
+            elif not wrap: line += bit
+            else: x -= w
+            if wrap:
+                lines.append((line, x, lh))
                 line = words[i]
                 x = w
                 h += lh
                 lh = bh
             i += 1
         if line:
-            lines.append(line)
+            lines.append((line, x, lh))
             h += lh
         return (h,lines)
 
@@ -131,8 +135,8 @@ class ListMenu(Menu):
                 i -= 1
             (i,y) = (self.index+1, btm+Spacing)
             while i < len(self.keys) and y < self.d.height:
-                item = self.center(self.keys[i], _Unselected, self.ui.smallFont, y)
-                y += item[1] + Spacing
+                h = self.center(self.keys[i], _Unselected, self.ui.smallFont, y)[1]
+                y += h + Spacing
                 i += 1
         self.d.flip()
 
@@ -342,6 +346,7 @@ class MainMenu(ListMenu):
         d['Shuffle: ' + ('yes' if self.ui.shuffle else 'no')] = None
         d['Repeat: ' + ('yes' if self.ui.repeat else 'no')] = None
         d['Wifi: ' + ('on' if self.ui.isWifiEnabled else 'off')] = None
+        d['System'] = None
         d['Exit'] = None
         return d
 
@@ -352,6 +357,7 @@ class MainMenu(ListMenu):
         if key == 'Playlist': self.ui.push(GroupMenu(self.ui.playlist.songs, playlist=True))
         elif key == 'Library': self.ui.push(LibraryMenu())
         elif key == 'Bluetooth': self.ui.push(BluetoothMenu())
+        elif key == 'System': self.ui.push(SystemMenu())
         elif key == 'Exit': self.ui.exit()
         elif key.startswith('Shuffle'):
             self.ui.shuffle = not self.ui.shuffle
@@ -365,6 +371,32 @@ class MainMenu(ListMenu):
         elif key.startswith('Wifi'):
             self.ui.enableWifi(not self.ui.isWifiEnabled)
             self.refreshList(False)
+
+class SystemMenu(Menu):
+    def __init__(self):
+        super().__init__()
+        self.ticks = 0
+
+    def paint(self):
+        self.d.clear()
+        load = subprocess.run(['/usr/bin/uptime'], capture_output=True)
+        load = re.search('load average:\s*([0-9]+(?:\.[0-9]*)?)', load.stdout.decode('utf-8'))
+        mem = subprocess.run(['/usr/bin/free', '-wk'], capture_output=True)
+        mem = re.search('Mem:\s*([0-9]+)\s+([0-9]+)', mem.stdout.decode('utf-8'))
+        with open('/sys/class/thermal/thermal_zone0/temp') as f: temp = int(f.read())
+        (y,h) = self.center(
+            'Mem: ' + str(int(int(mem.group(2))/102.4+0.5)/10) + ' / ' + str(int(int(mem.group(1))/1024+0.5)) + ' MB', _C.White)
+        load = self.measure('CPU load: ' + load.group(1))
+        self.center(load, _C.White, y=y-load[0]-4)
+        self.center('Temp: ' + str(int((temp*9//5+32050)//100)/10) + ' F', _C.White, y=y+h+4)
+        self.d.flip()
+
+    def onPress(self, btn):
+        if btn == _C.B: self.ui.pop()
+
+    def tick(self):
+        self.ticks += 1
+        if self.ticks % 5 == 0: self.paint() # repaint every 5 seconds
 
 class LibraryMenu(ListMenu):
     def getItems(self):
@@ -664,11 +696,12 @@ class UI:
 
     def _mediaButton(self, btn):
         if btn == buttons.KEY_PREVIOUS or btn == buttons.KEY_NEXT: self._prevNextTrack(btn, True)
-        elif btn == buttons.KEY_PAUSE or btn == buttons.KEY_PLAYPAUSE: # some devices send PAUSE when they mean PLAYPAUSE...
+        elif btn == buttons.KEY_PLAY: self.playCurrent()
+        elif btn == buttons.KEY_PAUSE: self._pause()
+        elif btn == buttons.KEY_STOP: self._stop()
+        elif btn == buttons.KEY_PLAYPAUSE:
             if self.player.is_playing(): self._pause()
             else: self.playCurrent()
-        elif btn == buttons.KEY_PLAY: self.playCurrent()
-        elif btn == buttons.KEY_STOP: self._stop()
 
     def _pause(self):
         self.player.pause()
