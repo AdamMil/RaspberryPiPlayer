@@ -382,16 +382,31 @@ class SystemMenu(Menu):
         self.ticks = 0
 
     def paintCore(self):
+        freq = subprocess.run(['/usr/bin/vcgencmd', 'measure_clock', 'arm'], capture_output=True)
+        freq = int(re.search('=([0-9]+)$', freq.stdout.decode('ascii')).group(1))
         load = subprocess.run(['/usr/bin/uptime'], capture_output=True)
-        load = re.search('load average:\s*([0-9]+(?:\.[0-9]*)?)', load.stdout.decode('utf-8'))
+        load = re.search('load average:\s*([0-9]+(?:\.[0-9]*)?)', load.stdout.decode('ascii')).group(1)
         mem = subprocess.run(['/usr/bin/free', '-wk'], capture_output=True)
-        mem = re.search('Mem:\s*([0-9]+)\s+([0-9]+)', mem.stdout.decode('utf-8'))
+        mem = re.search('Mem:\s*([0-9]+)\s+([0-9]+)', mem.stdout.decode('ascii'))
+        flags = subprocess.run(['/usr/bin/vcgencmd', 'get_throttled'], capture_output=True)
+        flags = int(re.search('=0x([0-9]+)$', flags.stdout.decode('ascii')).group(1), 16)
         with open('/sys/class/thermal/thermal_zone0/temp') as f: temp = int(f.read())
         (y,h) = self.center(
             'Mem: ' + str(int(int(mem.group(2))/102.4+0.5)/10) + ' / ' + str(int(int(mem.group(1))/1024+0.5)) + ' MB', _C.White)
-        load = self.measure('CPU load: ' + load.group(1))
+        load = self.measure('CPU: ' + load + ' @ ' + str((freq+5000000)//10000000/100) + ' ghz')
         self.center(load, _C.White, y=y-load[0]-4)
-        self.center('Temp: ' + str(int((temp*9//5+32500)//1000)) + ' F (' + str(int(temp+500)//1000) + ' C)', _C.White, y=y+h+4)
+        color = _C.White if temp < 60000 else _C.Yellow if temp < 70000 else _C.Orange if temp < 80000 else _C.Red
+        d = self.center('Temp: ' + str(int((temp*9//5+32500)//1000)) + ' F (' + str(int(temp+500)//1000) + ' C)', color, y=y+h+4)
+        if flags & 0xF000F:
+            def decode(f):
+                s = ''
+                if f & 2: s += 'F'
+                if f & 8: s += 'H'
+                if f & 4: s += 'T'
+                if f & 1: s += 'V'
+                return s
+            color = _C.Red if flags & 9 else _C.Orange if flags & 0x90000 else _C.Yellow if flags & 6 else _C.White
+            self.center('Flags: ' + decode(flags) + decode(flags >> 16).lower(), color, y=d[0]+d[1]+4)
 
     def onPress(self, btn):
         if btn == _C.B: self.ui.pop()

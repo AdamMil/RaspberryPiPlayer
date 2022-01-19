@@ -17,6 +17,9 @@ class Display:
     Black = (0,0,0)
     Gray = (128,128,128)
     White = (255,255,255)
+    Red = (255,0,0)
+    Orange = (255,128,0)
+    Yellow = (255,255,0)
 
     def __init__(self, onpress=None):
         self.display = st7789.ST7789(
