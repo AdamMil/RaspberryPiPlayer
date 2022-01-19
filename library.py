@@ -5,7 +5,7 @@ import stat
 
 _numRe = re.compile(r'^\s*[0-9]+\s*$')
 _songRe = re.compile(r"^\s*(.+?)\s+-\s+(.+?)\.[^\.]+$", re.S)
-_exts = ['.aac', '.mp3','.ogg','.opus','.wav']
+_exts = {e:None for e in ['aac','aiff','alac','au','flac','m4a','m4b','mp3','oga','ogg','opus','ra','rm','wav','webm','wma']}
 
 class Group:
     def __init__(self, name, songs):
@@ -48,7 +48,7 @@ class Library:
                 Library._scanSongs(root, rel+'/'+name, songs)
             else:
                 (base, ext) = os.path.splitext(name)
-                if ext in _exts:
+                if ext[1:].lower() in _exts:
                     m = _songRe.fullmatch(name)
                     if not m:
                         (artist, title) = ('Unknown', base)

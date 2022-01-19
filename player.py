@@ -85,7 +85,7 @@ class ListMenu(Menu):
     def __init__(self):
         super().__init__()
         self.collapse = False
-        self.sort = True
+        self.sort = False
         self.keepIndex = False
         self.keys = None
         self.index = 0
@@ -95,6 +95,7 @@ class ListMenu(Menu):
         if firstTime: self.refreshList(False)
         super().enter(firstTime)
 
+    def getColor(self, key): return _Selected
     def getItems(self): return {}
 
     def onPress(self, btn):
@@ -127,7 +128,7 @@ class ListMenu(Menu):
     def paintCore(self):
         if len(self.keys):
             Spacing = 4
-            (y,h) = self.center(self.keys[self.index], _Selected)
+            (y,h) = self.center(self.keys[self.index], self.getColor(self.keys[self.index]))
             btm = y+h
             i = self.index-1
             while i >= 0 and y >= Spacing:
@@ -216,6 +217,8 @@ class ListMenu(Menu):
         if self.sort: self.keys.sort(key=str.casefold)
 
 class BluetoothMenu(ListMenu):
+    def __init__(self): self.sort = True
+
     def deinit(self):
         self.ui.scanner.stopScan()
         super().deinit()
@@ -240,7 +243,6 @@ class DeviceMenu(ListMenu):
     def __init__(self, addr):
         super().__init__()
         self.addr = addr
-        self.sort = False
         self.keepIndex = True
 
     def getItems(self):
@@ -336,11 +338,17 @@ class RootMenu(Menu):
 class MainMenu(ListMenu):
     def __init__(self):
         super().__init__()
-        self.sort = False
+        self.locked = False
+        self.keepIndex = True
 
     def enter(self, firstTime):
         if not firstTime: self.refreshList()
         super().enter(firstTime)
+
+    def getColor(self, key):
+        if self.locked: return _C.Orange
+        elif self.ui.isWifiEnabled and key.startswith('Bluetooth'): return (160,160,160)
+        else: return super().getColor(key)
 
     def getItems(self):
         d = {}
@@ -349,17 +357,36 @@ class MainMenu(ListMenu):
         d['Bluetooth' + (' (off)' if self.ui.isWifiEnabled else '')] = None
         d['Shuffle: ' + ('yes' if self.ui.shuffle else 'no')] = None
         d['Repeat: ' + ('yes' if self.ui.repeat else 'no')] = None
+        d['Volume: ' + str(self.ui.volume)] = None
         d['Wifi: ' + ('on' if self.ui.isWifiEnabled else 'off')] = None
         d['System'] = None
         d['Exit'] = None
         return d
 
     def onPress(self, btn):
-        if btn != _C.B or not self.ui.playlist.isempty(): super().onPress(btn)
+        if self.locked:
+            if btn == _C.A or btn == _C.B or btn == _C.C:
+                self.locked = False
+                self.paint()
+            else:
+                newVolume = self.ui.volume
+                if btn == _C.U: newVolume += 10
+                elif btn == _C.D: newVolume -= 10
+                elif btn == _C.L: newVolume -= 30
+                elif btn == _C.R: newVolume += 30
+                newVolume = max(0, min(100, (newVolume+5)//10*10))
+                if newVolume != self.ui.volume:
+                    self.ui.setVolume(newVolume)
+                    self.ui.saveSettings()
+                    self.refreshList()
+        elif btn != _C.B or not self.ui.playlist.isempty():
+            super().onPress(btn)
 
     def onSelected(self, key, value, btn):
         if key == 'Playlist': self.ui.push(GroupMenu(self.ui.playlist.songs, playlist=True))
-        elif key == 'Library': self.ui.push(LibraryMenu())
+        elif key == 'Library':
+            if len(self.ui.library.groups) != 1: self.ui.push(LibraryMenu())
+            else: self.ui.push(GroupMenu(next(iter(self.ui.library.groups.values())).songs))
         elif key == 'Bluetooth': self.ui.push(BluetoothMenu())
         elif key == 'System': self.ui.push(SystemMenu())
         elif key == 'Exit': self.ui.exit()
@@ -372,6 +399,9 @@ class MainMenu(ListMenu):
             self.ui.repeat = not self.ui.repeat
             self.ui.saveSettings()
             self.refreshList(False)
+        elif key.startswith('Volume'):
+            self.locked = True
+            self.paint()
         elif key.startswith('Wifi'):
             self.ui.enableWifi(not self.ui.isWifiEnabled)
             self.refreshList(False)
@@ -420,6 +450,7 @@ class MusicMenu(ListMenu):
         super().__init__()
         self.collapse = True
         self.songs = songs
+        self.sort = True
         self.playlist = playlist
         self.trimNumbers = trimNumbers
 
@@ -513,7 +544,6 @@ class GroupMenu(MusicMenu):
 class PlayMenu(ListMenu):
     def __init__(self, songs, h1=None, h2=None, playlist=False, trimNumbers=False):
         super().__init__()
-        self.sort = False
         self.songs = songs
         self.playlist = playlist
         self.trimNumbers = trimNumbers
@@ -693,6 +723,12 @@ class UI:
         if self.playlist.select(song) and self.playlist.index != index: self.saveSettings()
         return self.playlist.index if not self.playlist.isempty() else -1
 
+    def setVolume(self, volume):
+        volume = max(0, min(100, volume))
+        if volume != self.volume:
+            self.player.audio_set_volume(volume)
+            self.volume = volume
+
     def shuffleSongs(self, changeSong=False):
         self.playlist.shuffle(changeSong)
         if not changeSong and not self.playlist.isempty(): self.saveSettings()
@@ -723,16 +759,19 @@ class UI:
         self.playlist = library.Playlist('/home/pi/music/playlist', self.library)
         self.player = vlc.MediaPlayer()
         self.buttons.start()
+        self.volume = 100
 
         try:
             with open('/home/pi/.player') as f:
                 settings = json.loads(f.read())
                 self.repeat = settings.get('repeat', self.repeat)
                 self.shuffle = settings.get('shuffle', self.shuffle)
+                self.volume = max(0, min(100, settings.get('volume', 100)))
                 song = settings.get('song')
                 if song: self.playlist.select(song)
         except: pass
 
+        self.player.audio_set_volume(self.volume)
         self.pendingPlay = 0
         self.shouldBePlaying = False
         self.isWifiEnabled = self._checkWifiEnabled()
@@ -747,7 +786,7 @@ class UI:
             else: self._mediaButton(e)
 
     def saveSettings(self):
-        settings = {'repeat':self.repeat, 'shuffle':self.shuffle}
+        settings = {'repeat':self.repeat, 'shuffle':self.shuffle, 'volume':self.volume}
         song = self.playlist.getCurrent()
         if song: settings['song'] = song.path
         with open('/home/pi/.player', 'w') as f: f.write(json.dumps(settings))
