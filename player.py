@@ -10,6 +10,7 @@ import re
 import signal
 import subprocess
 import sys
+import time
 import urllib.parse
 import vlc
 
@@ -324,14 +325,15 @@ class RootMenu(Menu):
         self.d.flip()
 
     def tick(self):
-        isPlaying = self.ui.player.is_playing()
-        if isPlaying or self.ui.shouldBePlaying:
-            if not isPlaying:
-                newIndex = self.ui.playlist.index + 1
-                if self.ui.repeat and newIndex >= self.ui.playlist.count(): newIndex = 0
-                if self.ui.selectSong(newIndex) >= 0: self.ui.playCurrent()
-                else: self.ui.stopPlaying()
-            self.paint()
+        if not self.ui.pendingPlay:
+            isPlaying = self.ui.player.is_playing()
+            if isPlaying or self.ui.shouldBePlaying:
+                if not isPlaying:
+                    newIndex = self.ui.playlist.index + 1
+                    if self.ui.repeat and newIndex >= self.ui.playlist.count(): newIndex = 0
+                    if self.ui.selectSong(newIndex) >= 0: self.ui.playCurrent()
+                    else: self.ui.stopPlaying()
+                self.paint()
 
 class MainMenu(ListMenu):
     def __init__(self):
@@ -392,7 +394,7 @@ class SystemMenu(Menu):
             'Mem: ' + str(int(int(mem.group(2))/102.4+0.5)/10) + ' / ' + str(int(int(mem.group(1))/1024+0.5)) + ' MB', _C.White)
         load = self.measure('CPU load: ' + load.group(1))
         self.center(load, _C.White, y=y-load[0]-4)
-        self.center('Temp: ' + str(int((temp*9//5+32050)//100)/10) + ' F', _C.White, y=y+h+4)
+        self.center('Temp: ' + str(int((temp*9//5+32500)//1000)) + ' F (' + str(int(temp+500)//1000) + ' C)', _C.White, y=y+h+4)
         self.d.flip()
 
     def onPress(self, btn):
@@ -670,6 +672,7 @@ class UI:
                 if song: self.playlist.select(song)
         except: pass
 
+        self.pendingPlay = 0
         self.shouldBePlaying = False
         self.isWifiEnabled = self._checkWifiEnabled()
         self.stack.pop().leave()
@@ -688,7 +691,11 @@ class UI:
         if song: settings['song'] = song.path
         with open('/home/pi/.player', 'w') as f: f.write(json.dumps(settings))
 
-    def tick(self): self.menu().tick()
+    def tick(self):
+        self.menu().tick()
+        if self.pendingPlay and time.monotonic() >= self.pendingPlay:
+            self.playCurrent()
+            self._repaint(RootMenu)
 
     def _checkWifiEnabled(self):
         p = subprocess.run(['/usr/sbin/rfkill', '--json'], capture_output=True)
@@ -710,15 +717,17 @@ class UI:
     def _pause(self):
         self.player.pause()
         self.shouldBePlaying = False
+        self.pendingPlay = 0
 
     def _play(self):
         self.player.play()
         self.shouldBePlaying = True
+        self.pendingPlay = 0
 
     def _prevNextTrack(self, btn, canRewind=False):
         changed = False
         rewind = False
-        if canRewind and btn == buttons.KEY_PREVIOUS and self.shouldBePlaying:
+        if canRewind and btn == buttons.KEY_PREVIOUS and not self.pendingPlay and self.shouldBePlaying:
             media = self.ensureMedia()
             rewind = media and media.get_duration() * self.player.get_position() > 5000
         if rewind:
@@ -730,9 +739,17 @@ class UI:
             if newIndex < 0: newIndex = self.playlist.count() - 1
             elif newIndex >= self.playlist.count(): newIndex = 0
             if self.selectSong(newIndex) != oldIndex:
-                if self.player.is_playing(): self.playCurrent()
                 changed = True
+                if self.shouldBePlaying: self.pendingPlay = time.monotonic() + 1.5
 
-        if changed and type(self.menu()) == RootMenu: self.menu().paint()
+        if changed: self._repaint(RootMenu)
+
+    def _repaint(self, menuType): # yuck?
+         if isinstance(self.menu(), menuType): self.menu().paint()
+
+    def _stop(self):
+        self.player.stop()
+        self.shouldBePlaying = False
+        self.pendingPlay = 0
 
 UI().run()
