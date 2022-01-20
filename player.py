@@ -394,17 +394,17 @@ class MainMenu(ListMenu):
             self.ui.shuffle = not self.ui.shuffle
             self.ui.saveSettings()
             if self.ui.shuffle: self.ui.shuffleSongs(not self.ui.player.is_playing())
-            self.refreshList(False)
+            self.refreshList()
         elif key.startswith('Repeat'):
             self.ui.repeat = not self.ui.repeat
             self.ui.saveSettings()
-            self.refreshList(False)
+            self.refreshList()
         elif key.startswith('Volume'):
             self.locked = True
             self.paint()
         elif key.startswith('Wifi'):
             self.ui.enableWifi(not self.ui.isWifiEnabled)
-            self.refreshList(False)
+            self.refreshList()
 
 class SystemMenu(Menu):
     def __init__(self):
@@ -736,6 +736,7 @@ class UI:
     def stopPlaying(self):
         self.player.stop()
         self.shouldBePlaying = False
+        self.pendingPlay = 0
 
     def togglePlay(self):
         if not self.player.is_playing(): self._play()
@@ -748,12 +749,17 @@ class UI:
             subprocess.run(['/usr/sbin/rfkill', 'block' if on else 'unblock', 'bluetooth'])
 
     def run(self):
-        def sigint(sig, frame): self.exit()
-        def sigalarm(sig, frame):
+        def shutdown(sig, frame): self.exit()
+        def onalarm(sig, frame):
             self.events.put(0)
             signal.alarm(1)
-        signal.signal(signal.SIGINT, sigint)
-        signal.signal(signal.SIGALRM, sigalarm)
+        signal.signal(signal.SIGALRM, onalarm)
+        signal.signal(signal.SIGHUP, shutdown)
+        signal.signal(signal.SIGINT, shutdown)
+        signal.signal(signal.SIGTERM, shutdown)
+        signal.signal(signal.SIGCONT, lambda s,f: self.events.put(buttons.KEY_PLAYPAUSE))
+        signal.signal(signal.SIGUSR1, lambda s,f: self.events.put(buttons.KEY_PREVIOUS))
+        signal.signal(signal.SIGUSR2, lambda s,f: self.events.put(buttons.KEY_NEXT))
         self.scanner.start()
         self.library.scan()
         self.playlist = library.Playlist('/home/pi/music/playlist', self.library)
@@ -809,7 +815,7 @@ class UI:
         if btn == buttons.KEY_PREVIOUS or btn == buttons.KEY_NEXT: self._prevNextTrack(btn, True)
         elif btn == buttons.KEY_PLAY: self.playCurrent()
         elif btn == buttons.KEY_PAUSE: self._pause()
-        elif btn == buttons.KEY_STOP: self._stop()
+        elif btn == buttons.KEY_STOP: self.stopPlaying()
         elif btn == buttons.KEY_PLAYPAUSE:
             if self.player.is_playing(): self._pause()
             else: self.playCurrent()
@@ -846,10 +852,5 @@ class UI:
 
     def _repaint(self, menuType): # yuck?
          if isinstance(self.menu(), menuType): self.menu().paint()
-
-    def _stop(self):
-        self.player.stop()
-        self.shouldBePlaying = False
-        self.pendingPlay = 0
 
 UI().run()
