@@ -29,7 +29,7 @@ class Menu:
         self.enter(True)
     def enter(self, firstTime): self.paint()
     def leave(self): pass
-    def onBtEvent(self, dev, op): pass
+    def onBluetoothEvent(self, dev, op): pass
     def onPress(self, btn): pass
     def paint(self):
         self.ui.clear()
@@ -231,7 +231,7 @@ class BluetoothMenu(ListMenu):
         devices = {dev.name: dev.addr for dev in self.ui.scanner.devices.values() if self._isAudioSink(dev)}
         return devices if len(devices) != 0 else {'Scanning...': None}
 
-    def onBtEvent(self, dev, op): self.refreshList()
+    def onBluetoothEvent(self, dev, op): self.refreshList()
 
     def onSelected(self, key, value, btn):
         if value is not None: self.ui.push(DeviceMenu(value))
@@ -254,7 +254,7 @@ class DeviceMenu(ListMenu):
                 'Forget' if dev.paired else 'Pair': None,
                 'Untrust' if dev.trusted else 'Trust': None}
 
-    def onBtEvent(self, dev, op):
+    def onBluetoothEvent(self, dev, op):
         if dev.addr == self.addr:
             if op == 'D': self.ui.pop()
             else: self.refreshList()
@@ -359,8 +359,7 @@ class MainMenu(ListMenu):
         d['Repeat: ' + ('yes' if self.ui.repeat else 'no')] = None
         d['Volume: ' + str(self.ui.volume)] = None
         d['Wifi: ' + ('on' if self.ui.isWifiEnabled else 'off')] = None
-        d['System'] = None
-        d['Exit'] = None
+        for k in ('System','Sleep','Exit'): d[k] = None
         return d
 
     def onPress(self, btn):
@@ -389,6 +388,7 @@ class MainMenu(ListMenu):
             else: self.ui.push(GroupMenu(next(iter(self.ui.library.groups.values())).songs))
         elif key == 'Bluetooth': self.ui.push(BluetoothMenu())
         elif key == 'System': self.ui.push(SystemMenu())
+        elif key == 'Sleep': self.ui.sleep()
         elif key == 'Exit': self.ui.exit()
         elif key.startswith('Shuffle'):
             self.ui.shuffle = not self.ui.shuffle
@@ -606,6 +606,7 @@ class UI:
     def __init__(self):
         self.repeat = True
         self.shuffle = True
+        self.sleeping = False
         self.events = queue.Queue()
         self.display = display.Display(lambda btn: self.events.put(btn))
         self.display.power(True)
@@ -614,11 +615,11 @@ class UI:
         self.stack = [LoadingMenu()]
         self.menu().init(self)
         self.library = library.Library('/home/pi/music')
-        self.scanner = bluetooth.Scanner(onAdded=lambda s,d: self.btEvent(d, 'A'),
-            onChanged=lambda s,d: self.btEvent(d, 'C'), onRemoved=lambda s,d: self.btEvent(d, 'R'))
+        self.scanner = bluetooth.Scanner(onAdded=lambda s,d: self.bluetoothEvent(d, 'A'),
+            onChanged=lambda s,d: self.bluetoothEvent(d, 'C'), onRemoved=lambda s,d: self.bluetoothEvent(d, 'R'))
         self.buttons = buttons.ButtonScanner(lambda btn: self.events.put(btn))
 
-    def btEvent(self, dev, op): self.menu().onBtEvent(dev, op)
+    def bluetoothEvent(self, dev, op): self.menu().onBluetoothEvent(dev, op)
     def cleanup(self):
         self.buttons.stop()
         self.scanner.stop()
@@ -628,10 +629,16 @@ class UI:
 
     def exit(self):
         signal.alarm(0) # cancel any pending alarm to prevent an error being printed if an alarm happens during shutdown
+        if self.sleeping: self.enableWifi(self.isWifiEnabled) # restore networking
         self.cleanup()
         sys.exit(0)
 
     def menu(self): return self.stack[-1]
+
+    def onPress(self, btn):
+        self.idleTicks = 0
+        if self.sleeping: self.wake()
+        else: self.menu().onPress(btn)
 
     def push(self, menu):
         self.menu().leave()
@@ -709,11 +716,16 @@ class UI:
                 if tte < 1000: self.player.stop() # so restart it by calling .stop()
                 self._play()
             elif toggle:
-                self._pause()
+                self.pausePlaying()
 
     def playSongs(self, songs, clear=False, trimNumbers=False, toggle=False):
         if clear: self.playlist.clear()
         self.playSong(self.addSongs(songs, moveTo=True, trimNumbers=trimNumbers), toggle)
+
+    def pausePlaying(self):
+        self.player.pause()
+        self.shouldBePlaying = False
+        self.pendingPlay = 0
 
     def previousTrack(self, canRewind=False): return self._prevNextTrack(buttons.KEY_PREVIOUS, canRewind)
     def nextTrack(self): return self._prevNextTrack(buttons.KEY_NEXT)
@@ -733,6 +745,20 @@ class UI:
         self.playlist.shuffle(changeSong)
         if not changeSong and not self.playlist.isempty(): self.saveSettings()
 
+    def sleep(self):
+        self.sleeping = True
+        signal.alarm(0) # cancel pending alarms
+        self.pausePlaying()
+        subprocess.run(['/usr/bin/sudo', '/usr/local/bin/kill-wifi'])
+        subprocess.run(['/usr/sbin/rfkill', 'block', 'bluetooth'])
+        self.display.power(False)
+
+    def wake(self):
+        self.sleeping = False
+        signal.alarm(1) # resume alarms
+        self.enableWifi(self.isWifiEnabled)
+        self.display.power(True)
+
     def stopPlaying(self):
         self.player.stop()
         self.shouldBePlaying = False
@@ -740,7 +766,7 @@ class UI:
 
     def togglePlay(self):
         if not self.player.is_playing(): self._play()
-        else: self._pause()
+        else: self.pausePlaying()
 
     def enableWifi(self, on):
         p = subprocess.run(['/usr/bin/sudo', '/usr/local/bin/' + ('revive' if on else 'kill') + '-wifi'])
@@ -751,8 +777,9 @@ class UI:
     def run(self):
         def shutdown(sig, frame): self.exit()
         def onalarm(sig, frame):
-            self.events.put(0)
-            signal.alarm(1)
+            if not self.sleeping:
+                self.events.put(0)
+                signal.alarm(1)
         signal.signal(signal.SIGALRM, onalarm)
         signal.signal(signal.SIGHUP, shutdown)
         signal.signal(signal.SIGINT, shutdown)
@@ -765,6 +792,7 @@ class UI:
         self.playlist = library.Playlist('/home/pi/music/playlist', self.library)
         self.player = vlc.MediaPlayer()
         self.buttons.start()
+        self.idleTicks = 0
         self.volume = 100
 
         try:
@@ -788,7 +816,7 @@ class UI:
         while True: # TODO: now that we have a queue, collapse painting together, etc
             e = self.events.get()
             if e == 0: self.tick()
-            elif e <= 40: self.menu().onPress(e)
+            elif e <= 40: self.onPress(e)
             else: self._mediaButton(e)
 
     def saveSettings(self):
@@ -802,6 +830,9 @@ class UI:
         if self.pendingPlay and time.monotonic() >= self.pendingPlay:
             self.playCurrent()
             self._repaint(RootMenu)
+        elif not self.shouldBePlaying and not self.pendingPlay:
+            self.idleTicks += 1
+            if self.idleTicks == 180: self.sleep() # go to sleep after 3 minutes of idleness
 
     def _checkWifiEnabled(self):
         p = subprocess.run(['/usr/sbin/rfkill', '--json'], capture_output=True)
@@ -812,18 +843,15 @@ class UI:
         return False
 
     def _mediaButton(self, btn):
+        self.idleTicks = 0
+        if self.sleeping: self.wake()
         if btn == buttons.KEY_PREVIOUS or btn == buttons.KEY_NEXT: self._prevNextTrack(btn, True)
         elif btn == buttons.KEY_PLAY: self.playCurrent()
-        elif btn == buttons.KEY_PAUSE: self._pause()
+        elif btn == buttons.KEY_PAUSE: self.pausePlaying()
         elif btn == buttons.KEY_STOP: self.stopPlaying()
         elif btn == buttons.KEY_PLAYPAUSE:
-            if self.player.is_playing(): self._pause()
+            if self.player.is_playing(): self.pausePlaying()
             else: self.playCurrent()
-
-    def _pause(self):
-        self.player.pause()
-        self.shouldBePlaying = False
-        self.pendingPlay = 0
 
     def _play(self):
         self.player.play()
