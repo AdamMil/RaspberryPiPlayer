@@ -388,7 +388,7 @@ class MainMenu(ListMenu):
             else: self.ui.push(GroupMenu(next(iter(self.ui.library.groups.values())).songs))
         elif key == 'Bluetooth': self.ui.push(BluetoothMenu())
         elif key == 'System': self.ui.push(SystemMenu())
-        elif key == 'Sleep': self.ui.sleep()
+        elif key == 'Sleep': self.ui.sleep(disableWifi=True)
         elif key == 'Exit': self.ui.exit()
         elif key.startswith('Shuffle'):
             self.ui.shuffle = not self.ui.shuffle
@@ -412,6 +412,11 @@ class SystemMenu(Menu):
         self.ticks = 0
 
     def paintCore(self):
+        addr = None
+        if self.ui.isWifiEnabled:
+            addr = subprocess.run(['/usr/sbin/ifconfig', 'wlan0'], capture_output=True)
+            addr = re.search('\sinet\s+([0-9]{1,3}(?:\.[0-9]{1,3}){3})\s', addr.stdout.decode('ascii'))
+            if addr: addr = addr.group(1)
         freq = subprocess.run(['/usr/bin/vcgencmd', 'measure_clock', 'arm'], capture_output=True)
         freq = int(re.search('=([0-9]+)$', freq.stdout.decode('ascii')).group(1))
         load = subprocess.run(['/usr/bin/uptime'], capture_output=True)
@@ -421,10 +426,14 @@ class SystemMenu(Menu):
         flags = subprocess.run(['/usr/bin/vcgencmd', 'get_throttled'], capture_output=True)
         flags = int(re.search('=0x([0-9]+)$', flags.stdout.decode('ascii')).group(1), 16)
         with open('/sys/class/thermal/thermal_zone0/temp') as f: temp = int(f.read())
+
         (y,h) = self.center(
             'Mem: ' + str(int(int(mem.group(2))/102.4+0.5)/10) + ' / ' + str(int(int(mem.group(1))/1024+0.5)) + ' MB', _C.White)
         load = self.measure('CPU: ' + load + ' @ ' + str((freq+5000000)//10000000/100) + ' ghz')
         self.center(load, _C.White, y=y-load[0]-4)
+        if addr:
+            addr = self.measure('IP: ' + addr)
+            self.center(addr, _C.White, y=y-load[0]-addr[0]-8)
         color = _C.White if temp < 60000 else _C.Yellow if temp < 70000 else _C.Orange if temp < 80000 else _C.Red
         d = self.center('Temp: ' + str(int((temp*9//5+32500)//1000)) + ' F (' + str(int(temp+500)//1000) + ' C)', color, y=y+h+4)
         if flags & 0xF000F:
@@ -745,11 +754,11 @@ class UI:
         self.playlist.shuffle(changeSong)
         if not changeSong and not self.playlist.isempty(): self.saveSettings()
 
-    def sleep(self):
+    def sleep(self, disableWifi=False):
         self.sleeping = True
         signal.alarm(0) # cancel pending alarms
         self.pausePlaying()
-        subprocess.run(['/usr/bin/sudo', '/usr/local/bin/kill-wifi'])
+        if disableWifi: subprocess.run(['/usr/bin/sudo', '/usr/local/bin/kill-wifi'])
         subprocess.run(['/usr/sbin/rfkill', 'block', 'bluetooth'])
         self.display.power(False)
 
