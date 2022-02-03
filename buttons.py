@@ -24,6 +24,7 @@ class ButtonScanner:
         self.quitEvent = None
 
     def start(self):
+        self.mutex = threading.Lock()
         self.quitEvent = threading.Event()
         self.thread = threading.Thread(target=lambda: self._main(), name='ButtonScanner')
         self.thread.daemon = True
@@ -32,39 +33,41 @@ class ButtonScanner:
     def stop(self):
         if self.quitEvent is not None:
             self.quitEvent.set()
-            for t in self.devices.values():
-                if t: t[0].close()
-            self.devices.clear()
+            with self.mutex:
+                for t in self.devices.values():
+                    if t: t[0].close()
+                self.devices.clear()
             self.thread.join()
 
     def _main(self):
         while True:
             sysDevices = evdev.list_devices()
-            for name in self.devices.keys(): # close handles to devices that have disappeared
-                if name not in sysDevices:
-                    entry = self.devices[name]
-                    if entry: entry[0].close()
-                    self.devices.pop(name, None)
+            with self.mutex:
+                for name in self.devices.keys(): # close handles to devices that have disappeared
+                    if name not in sysDevices:
+                        entry = self.devices[name]
+                        if entry: entry[0].close()
+                        self.devices.pop(name, None)
 
-            for name in sysDevices: # and open handles to new devices that we're interested in
-                if name not in self.devices:
-                    try:
-                        dev = evdev.InputDevice(name)
-                        keys = dev.capabilities().get(_K.EV_KEY)
-                        wanted = False # we want it if it can report any of the keys we're looking for
-                        if keys:
-                            for k in keys:
-                                if k in _Desired:
-                                    wanted = True
-                                    break
-                        if not wanted:
-                            self.devices[name] = None # remember it for next time so we don't get its capabilities again
-                            dev.close()
-                        else:
-                            thread = threading.Thread(target=lambda d: self._scan(d), name=name, args=(dev,))
-                            self.devices[name] = (dev, thread)
-                            thread.start()
-                    except: pass
+                for name in sysDevices: # and open handles to new devices that we're interested in
+                    if name not in self.devices:
+                        try:
+                            dev = evdev.InputDevice(name)
+                            keys = dev.capabilities().get(_K.EV_KEY)
+                            wanted = False # we want it if it can report any of the keys we're looking for
+                            if keys:
+                                for k in keys:
+                                    if k in _Desired:
+                                        wanted = True
+                                        break
+                            if not wanted:
+                                self.devices[name] = None # remember it for next time so we don't get its capabilities again
+                                dev.close()
+                            else:
+                                thread = threading.Thread(target=lambda d: self._scan(d), name=name, args=(dev,))
+                                self.devices[name] = (dev, thread)
+                                thread.start()
+                        except: pass
 
             if self.quitEvent.wait(5): break
 
@@ -82,5 +85,5 @@ class ButtonScanner:
                         lastTime[e.code] = now
                         self._processKey(e.code)
         except:
-            self.devices.pop(dev.path, None)
+            with self.mutex: self.devices.pop(dev.path, None)
             dev.close()
