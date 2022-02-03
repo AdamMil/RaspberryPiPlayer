@@ -236,7 +236,9 @@ class ListMenu(Menu):
             self.keys.sort(key=keyfunc)
 
 class BluetoothMenu(ListMenu):
-    def __init__(self): self.sort = True
+    def __init__(self):
+        super().__init__()
+        self.sort = True
 
     def deinit(self):
         self.ui.scanner.stopScan()

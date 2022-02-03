@@ -153,7 +153,7 @@ class Scanner:
             if line: self._processLine(line)
             elif self._proc.poll() is not None: break
         
-    def _write(self, str):
+    def _write(self, line):
         self._checkRunning()
-        self._proc.stdin.write(str)
+        self._proc.stdin.write(line)
         self._proc.stdin.write("\n")
