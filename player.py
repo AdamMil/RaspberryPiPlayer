@@ -18,6 +18,8 @@ _C = display.Display
 _Background = _C.Black
 _Selected = _C.White
 _Unselected = _C.Gray
+_SelArtist = (255,216,164)
+_UnselArtist = (128,108,82)
 _numRe = re.compile('^[0-9]+ - ')
 
 class Menu:
@@ -85,42 +87,47 @@ class ListMenu(Menu):
     def __init__(self):
         super().__init__()
         self.collapse = False
-        self.sort = False
+        self.index = 0
+        self.jumpToBiggest = False
         self.keepIndex = False
         self.keys = None
-        self.index = 0
+        self.sort = False
         self.stack = None
+        self.vindex = 0
 
     def enter(self, firstTime):
         if firstTime: self.refreshList(False)
         super().enter(firstTime)
 
-    def getColor(self, key): return _Selected
+    def getColor(self, key, selected): return _Selected if selected else _Unselected
     def getItems(self): return {}
 
     def onPress(self, btn):
-        newIndex = self.index
+        newVIndex = self.vindex
         repaint = False
-        if btn == _C.U: newIndex = max(0, newIndex-1)
-        elif btn == _C.D: newIndex = min(len(self.keys)-1, newIndex+1)
-        elif btn == _C.L: newIndex = max(0, newIndex-8)
-        elif btn == _C.R: newIndex = min(len(self.keys)-1, newIndex+8)
+        if btn == _C.U: newVIndex = self.index - 1
+        elif btn == _C.D: newVIndex = self.index + 1
+        elif btn == _C.L: newVIndex -= 8
+        elif btn == _C.R: newVIndex += 8
         elif btn == _C.A or btn == _C.C:
-            value = self.items[self.keys[newIndex]]
+            value = self.items[self.keys[self.index]]
             if self.collapse and isinstance(value, ListMenu._collapsed):
                 self._setList({k:self.origItems[k] for k in value.keys}, len(self.stack)+1 if self.stack else 1, value.group)
-                (newIndex, repaint) = (0, True)
+                (newVIndex, repaint) = (self._initialIndex(), True)
             else:
-                self.onSelected(self.keys[newIndex], value, btn)
+                self.onSelected(self.keys[self.index], value, btn)
         elif btn == _C.B:
             if self.stack and len(self.stack):
-                (newIndex, self.items, self.keys) = self.stack.pop()
+                (newVIndex, self.items, self.keys) = self.stack.pop()
                 repaint = True
             else:
                 self.ui.pop()
-        if newIndex != self.index:
-            self.index = newIndex
-            repaint = True
+        if newVIndex != self.vindex:
+            newIndex = max(0, min(len(self.keys)-1, newVIndex))
+            if newIndex != self.index:
+                self.index = newIndex
+                self.vindex = newVIndex
+                repaint = True
         if repaint: self.paint()
 
     def onSelected(self, key, value, btn): pass
@@ -128,17 +135,17 @@ class ListMenu(Menu):
     def paintCore(self):
         if len(self.keys):
             Spacing = 4
-            (y,h) = self.center(self.keys[self.index], self.getColor(self.keys[self.index]))
+            (y,h) = self.center(self.keys[self.index], self.getColor(self.keys[self.index], True))
             btm = y+h
             i = self.index-1
             while i >= 0 and y >= Spacing:
                 item = self.measure(self.keys[i], self.ui.smallFont)
                 y = y - item[0] - Spacing
-                self.center(item, _Unselected, self.ui.smallFont, y)
+                self.center(item, self.getColor(self.keys[i], False), self.ui.smallFont, y)
                 i -= 1
             (i,y) = (self.index+1, btm+Spacing)
             while i < len(self.keys) and y < self.d.height:
-                h = self.center(self.keys[i], _Unselected, self.ui.smallFont, y)[1]
+                h = self.center(self.keys[i], self.getColor(self.keys[i], False), self.ui.smallFont, y)[1]
                 y += h + Spacing
                 i += 1
 
@@ -153,7 +160,15 @@ class ListMenu(Menu):
             except: self.index = 0
         else:
             self.index = 0
+        self.vindex = self.index
         if repaint: self.paint()
+
+    def _initialIndex(self):
+        if not self.jumpToBiggest: return 0
+        def ilen(i):
+           return len(i.keys) if type(i) == ListMenu._collapsed else \
+               len(i.songs) if type(i) == library.Group else len(i) if type(i) == list else 1
+        return -sorted(((ilen(self.items[self.keys[i]]), -i) for i in range(len(self.keys))), reverse=True)[0][1]
 
     def _setList(self, items, depth=0, prevBucket=None):
         if depth:
@@ -187,7 +202,7 @@ class ListMenu(Menu):
 
             if self.collapse == 'substr':
                 dedup = {}
-                for bucket, L in buckets.items():
+                for bucket, L in sorted(buckets.items(), key=lambda p: len(p[1]), reverse=True):
                     if len(L) > 2 and count > threshold:
                         key = '...' + bucket.upper() + '...'
                         self.keys.append(key)
@@ -214,7 +229,11 @@ class ListMenu(Menu):
                         self.keys.extend(L)
                         for k in L: self.items[k] = self.origItems[k]
 
-        if self.sort: self.keys.sort(key=str.casefold)
+        if self.sort:
+            keyfunc = str.casefold
+            if self.collapse == 'substr':
+                keyfunc = lambda k: str.casefold(k[3:] if k.startswith('...') else k)
+            self.keys.sort(key=keyfunc)
 
 class BluetoothMenu(ListMenu):
     def __init__(self): self.sort = True
@@ -345,10 +364,11 @@ class MainMenu(ListMenu):
         if not firstTime: self.refreshList()
         super().enter(firstTime)
 
-    def getColor(self, key):
-        if self.locked: return _C.Orange
-        elif self.ui.isWifiEnabled and key.startswith('Bluetooth'): return (160,160,160)
-        else: return super().getColor(key)
+    def getColor(self, key, selected):
+        if selected:
+            if self.locked: return _C.Orange
+            elif self.ui.isWifiEnabled and key.startswith('Bluetooth'): return (160,160,160)
+        return super().getColor(key, selected)
 
     def getItems(self):
         d = {}
@@ -610,6 +630,24 @@ class FindMenu(SongMenu):
     def __init__(self, songs, playlist=False):
         super().__init__(songs, playlist, trimNumbers=True)
         self.collapse = 'substr'
+        self.jumpToBiggest = True
+
+    def getColor(self, key, selected):
+        if type(self.items[key]) == list: return _SelArtist if selected else _UnselArtist
+        return super().getColor(key, selected)
+
+    def getItems(self):
+        d = super().getItems()
+        for s in self.songs:
+            L = d.get(s.artist)
+            if not L: d[s.artist] = L = []
+            elif type(L) != list: continue
+            L.append(s)
+        return d
+
+    def onSelected(self, key, value, btn):
+        if btn == _C.A or type(value) != list: super().onSelected(key, value, btn)
+        else: self.ui.push(SongMenu(value, trimNumbers=True))
 
 class UI:
     def __init__(self):
